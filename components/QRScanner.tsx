@@ -249,7 +249,10 @@ export function QRScanner({ isActive }: QRScannerProps) {
         {isScanning && <p className="text-center">Scanning...</p>}
 
         {lastScannedValue && (
-          <div className="p-3 bg-gray-100 rounded">{lastScannedValue}</div>
+          <>
+            <h4>Last scanned:</h4>
+            <div className="p-3 bg-gray-100 rounded">{lastScannedValue}</div>
+          </>
         )}
       </div>
     </div>
