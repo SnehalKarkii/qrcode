@@ -12,208 +12,186 @@ interface QRScannerProps {
 
 export function QRScanner({ isActive }: QRScannerProps) {
   const scannerRef = useRef<Html5Qrcode | null>(null);
-  const isRunningRef = useRef(false);
-  const [mounted, setMounted] = useState(false);
+  const isScannerRunningRef = useRef(false);
+  const [isMounted, setIsMounted] = useState(false);
 
   const {
     addNewScan,
     setError,
     clearError,
+    error,
     isScanning,
     setIsScanning,
     isScannerActive,
     setIsScannerActive,
     lastScannedValue,
-    error,
   } = useQRStore();
 
-  useEffect(() => setMounted(true), []);
+  useEffect(() => {
+    setIsMounted(true);
+  }, []);
 
-  // ⏳ wait until camera is ready
-  const waitForVideo = () =>
-    new Promise<void>((resolve) => {
-      const check = () => {
-        const video = document.querySelector("video") as HTMLVideoElement;
-        if (video && video.videoWidth > 0) resolve();
-        else requestAnimationFrame(check);
-      };
-      check();
-    });
+  // 📸 Capture current camera frame
+  const captureScanImage = async (): Promise<Blob | null> => {
+    try {
+      const video = document.querySelector(
+        "#qr-reader video",
+      ) as HTMLVideoElement;
 
-  // 📸 capture frame from video
-  const captureImage = async (): Promise<Blob | null> => {
-    const video = document.querySelector("video") as HTMLVideoElement;
+      if (!video) return null;
 
-    if (!video) {
-      console.warn("❌ Video not found");
-      return null;
-    }
+      const canvas = document.createElement("canvas");
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
 
-    if (video.videoWidth === 0 || video.readyState < 2) {
-      console.warn("❌ Video not ready");
-      return null;
-    }
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return null;
 
-    const canvas = document.createElement("canvas");
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return null;
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
-
-    ctx.drawImage(video, 0, 0);
-
-    return new Promise((resolve) => {
-      canvas.toBlob(
-        (blob) => {
-          console.log("📸 Captured blob size:", blob?.size);
-          resolve(blob);
-        },
-        "image/jpeg",
-        0.9,
+      return await new Promise((resolve) =>
+        canvas.toBlob((blob) => resolve(blob), "image/jpeg", 0.8),
       );
-    });
+    } catch (err) {
+      console.warn("Capture failed:", err);
+      return null;
+    }
   };
 
-  // ☁️ upload image to Supabase
-  const uploadImage = async (blob: Blob) => {
+  // ☁️ Upload image to Supabase Storage
+  const uploadScanImage = async (blob: Blob) => {
     const fileName = `scan-${Date.now()}.jpg`;
 
-    console.log("📦 Uploading blob size:", blob.size);
-
-    const result = await supabase.storage
+    const { error } = await supabase.storage
       .from("qr-scans")
       .upload(fileName, blob, {
         contentType: "image/jpeg",
-        upsert: true,
       });
 
-    console.log("📤 Upload result:", result);
-
-    if (result.error) {
-      console.error("❌ Upload error:", result.error.message);
-      return null;
-    }
+    if (error) throw error;
 
     const { data } = supabase.storage.from("qr-scans").getPublicUrl(fileName);
-
-    console.log("🌍 Public URL:", data.publicUrl);
 
     return data.publicUrl;
   };
 
-  // 💾 save to DB
-  const saveToDB = async (value: string, imageUrl?: string | null) => {
-    const { error } = await supabase.from("scans").insert({
-      value,
-      image_url: imageUrl ?? null,
-    });
+  // 💾 Save scan to DB
+  const saveToCloud = async (value: string, imageUrl?: string) => {
+    console.log("Saving to cloud:", value, imageUrl);
+    try {
+      const { error } = await supabase.from("scans").insert({
+        value,
+        image_url: imageUrl || null,
+      });
 
-    if (error) {
-      console.error("❌ DB error:", error.message);
-      throw error;
+      if (error) throw error;
+    } catch (err) {
+      console.warn("Supabase save failed:", err);
     }
   };
 
   useEffect(() => {
-    if (!mounted || !isActive) return;
+    if (!isMounted || !isActive) return;
 
-    let alive = true;
+    let isComponentMounted = true;
 
-    const startScanner = async () => {
+    const startScanning = async () => {
       if (!isScannerActive) return;
 
       try {
         clearError();
 
-        if (scannerRef.current && isRunningRef.current) {
+        if (scannerRef.current && isScannerRunningRef.current) {
           try {
             await scannerRef.current.stop();
           } catch {}
-
           scannerRef.current = null;
-          isRunningRef.current = false;
+          isScannerRunningRef.current = false;
         }
 
-        const scanner = new Html5Qrcode("qr-reader");
-        scannerRef.current = scanner;
+        scannerRef.current = new Html5Qrcode("qr-reader");
 
         const cameras = await Html5Qrcode.getCameras();
-        if (!cameras.length) throw new Error("No camera found");
 
-        const cameraId = cameras[cameras.length - 1].id;
+        if (!cameras.length) {
+          throw new Error("No cameras found");
+        }
 
-        await scanner.start(
-          cameraId,
-          { fps: 20, qrbox: { width: 180, height: 180 } },
+        await scannerRef.current.start(
+          cameras[cameras.length - 1].id,
+          {
+            fps: 20,
+            qrbox: { width: 250, height: 250 },
+          },
           async (decodedText) => {
-            try {
-              addNewScan(decodedText);
+            addNewScan(decodedText);
 
-              console.log("📱 QR detected:", decodedText);
+            // 📸 capture frame
+            const imageBlob = await captureScanImage();
 
-              // wait camera stability
-              await waitForVideo();
-              await new Promise((r) => setTimeout(r, 800));
+            let imageUrl = null;
 
-              const blob = await captureImage();
-
-              let imageUrl: string | null = null;
-
-              if (blob && blob.size > 0) {
-                imageUrl = await uploadImage(blob);
-              } else {
-                console.warn("⚠️ No image captured");
+            if (imageBlob) {
+              try {
+                imageUrl = await uploadScanImage(imageBlob);
+              } catch (err) {
+                console.warn("Image upload failed:", err);
               }
+            }
 
-              await saveToDB(decodedText, imageUrl);
+            // 💾 save both text + image
+            await saveToCloud(decodedText, imageUrl || undefined);
 
-              console.log("✅ Saved scan:", { decodedText, imageUrl });
-
-              if ("vibrate" in navigator) navigator.vibrate(100);
-            } catch (err) {
-              console.warn("Processing error:", err);
+            if ("vibrate" in navigator) {
+              navigator.vibrate(100);
             }
           },
-          (err) => console.debug("Scan error:", err),
+          (error) => {
+            console.debug("Scan error:", error);
+          },
         );
 
-        isRunningRef.current = true;
+        isScannerRunningRef.current = true;
 
-        if (alive) setIsScanning(true);
+        if (isComponentMounted) {
+          setIsScanning(true);
+        }
       } catch (err) {
-        setError(err instanceof Error ? err.message : "Scanner error");
+        const message =
+          err instanceof Error ? err.message : "Camera start failed";
+
+        setError(message);
         setIsScanning(false);
       }
     };
 
-    const stopScanner = async () => {
-      if (scannerRef.current && isRunningRef.current) {
+    const stopScanning = async () => {
+      if (scannerRef.current && isScannerRunningRef.current) {
         try {
           await scannerRef.current.stop();
         } catch {}
 
         scannerRef.current = null;
-        isRunningRef.current = false;
+        isScannerRunningRef.current = false;
         setIsScanning(false);
       }
     };
 
-    if (isScannerActive) startScanner();
-    else stopScanner();
+    if (isScannerActive) startScanning();
+    else stopScanning();
 
     return () => {
-      alive = false;
+      isComponentMounted = false;
 
-      if (scannerRef.current && isRunningRef.current) {
+      if (scannerRef.current && isScannerRunningRef.current) {
         scannerRef.current.stop().catch(() => {});
         scannerRef.current = null;
-        isRunningRef.current = false;
+        isScannerRunningRef.current = false;
       }
     };
-  }, [mounted, isActive, isScannerActive]);
+  }, [isMounted, isActive, isScannerActive]);
 
-  if (!mounted || !isActive) return null;
+  if (!isMounted || !isActive) return null;
 
   return (
     <div className="w-full max-w-2xl mx-auto px-4 py-8">
@@ -226,7 +204,7 @@ export function QRScanner({ isActive }: QRScannerProps) {
             }}
             disabled={isScannerActive}
           >
-            Start
+            Start Scanner
           </Button>
 
           <Button
@@ -234,7 +212,7 @@ export function QRScanner({ isActive }: QRScannerProps) {
             disabled={!isScannerActive}
             variant="outline"
           >
-            Stop
+            Stop Scanner
           </Button>
         </div>
 
@@ -246,13 +224,10 @@ export function QRScanner({ isActive }: QRScannerProps) {
           </div>
         )}
 
-        {isScanning && <p className="text-center">Scanning...</p>}
+        {isScanning && <p className="text-center text-sm">Scanning...</p>}
 
         {lastScannedValue && (
-          <>
-            <h4>Last scanned:</h4>
-            <div className="p-3 bg-gray-100 rounded">{lastScannedValue}</div>
-          </>
+          <div className="p-3 bg-gray-100 rounded">{lastScannedValue}</div>
         )}
       </div>
     </div>
