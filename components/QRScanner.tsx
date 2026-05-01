@@ -145,7 +145,7 @@ export function QRScanner({ isActive }: QRScannerProps) {
 
         await scanner.start(
           cameraId,
-          { fps: 10, qrbox: 250 },
+          { fps: 20, qrbox: { width: 180, height: 180 } },
           async (decodedText) => {
             try {
               addNewScan(decodedText);
