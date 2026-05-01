@@ -29,7 +29,7 @@ export function QRScanner({ isActive }: QRScannerProps) {
 
   useEffect(() => setMounted(true), []);
 
-  // ⏳ Wait for camera video readiness
+  // ⏳ wait until camera is ready
   const waitForVideo = () =>
     new Promise<void>((resolve) => {
       const check = () => {
@@ -40,57 +40,79 @@ export function QRScanner({ isActive }: QRScannerProps) {
       check();
     });
 
-  // 📸 Capture frame
+  // 📸 capture frame from video
   const captureImage = async (): Promise<Blob | null> => {
     const video = document.querySelector("video") as HTMLVideoElement;
 
-    if (!video || video.videoWidth === 0) {
-      console.warn("Video not ready");
+    if (!video) {
+      console.warn("❌ Video not found");
+      return null;
+    }
+
+    if (video.videoWidth === 0 || video.readyState < 2) {
+      console.warn("❌ Video not ready");
       return null;
     }
 
     const canvas = document.createElement("canvas");
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
-
     const ctx = canvas.getContext("2d");
     if (!ctx) return null;
 
-    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+
+    ctx.drawImage(video, 0, 0);
 
     return new Promise((resolve) => {
-      canvas.toBlob((blob) => resolve(blob), "image/jpeg", 0.9);
+      canvas.toBlob(
+        (blob) => {
+          console.log("📸 Captured blob size:", blob?.size);
+          resolve(blob);
+        },
+        "image/jpeg",
+        0.9,
+      );
     });
   };
 
-  // ☁️ Upload image to Supabase Storage
+  // ☁️ upload image to Supabase
   const uploadImage = async (blob: Blob) => {
     const fileName = `scan-${Date.now()}.jpg`;
 
-    const { data, error } = await supabase.storage
+    console.log("📦 Uploading blob size:", blob.size);
+
+    const result = await supabase.storage
       .from("qr-scans")
       .upload(fileName, blob, {
         contentType: "image/jpeg",
         upsert: true,
       });
 
-    if (error) throw error;
+    console.log("📤 Upload result:", result);
 
-    const { data: publicUrl } = supabase.storage
-      .from("qr-scans")
-      .getPublicUrl(fileName);
+    if (result.error) {
+      console.error("❌ Upload error:", result.error.message);
+      return null;
+    }
 
-    return publicUrl.publicUrl;
+    const { data } = supabase.storage.from("qr-scans").getPublicUrl(fileName);
+
+    console.log("🌍 Public URL:", data.publicUrl);
+
+    return data.publicUrl;
   };
 
-  // 💾 Save to DB
-  const saveToDB = async (value: string, imageUrl?: string) => {
+  // 💾 save to DB
+  const saveToDB = async (value: string, imageUrl?: string | null) => {
     const { error } = await supabase.from("scans").insert({
       value,
-      image_url: imageUrl || null,
+      image_url: imageUrl ?? null,
     });
 
-    if (error) throw error;
+    if (error) {
+      console.error("❌ DB error:", error.message);
+      throw error;
+    }
   };
 
   useEffect(() => {
@@ -108,6 +130,7 @@ export function QRScanner({ isActive }: QRScannerProps) {
           try {
             await scannerRef.current.stop();
           } catch {}
+
           scannerRef.current = null;
           isRunningRef.current = false;
         }
@@ -127,21 +150,25 @@ export function QRScanner({ isActive }: QRScannerProps) {
             try {
               addNewScan(decodedText);
 
-              // 🔥 ensure camera is ready
+              console.log("📱 QR detected:", decodedText);
+
+              // wait camera stability
               await waitForVideo();
-              await new Promise((r) => setTimeout(r, 300));
+              await new Promise((r) => setTimeout(r, 800));
 
               const blob = await captureImage();
 
-              let imageUrl = null;
+              let imageUrl: string | null = null;
 
-              if (blob) {
+              if (blob && blob.size > 0) {
                 imageUrl = await uploadImage(blob);
+              } else {
+                console.warn("⚠️ No image captured");
               }
 
-              await saveToDB(decodedText, imageUrl ?? undefined);
+              await saveToDB(decodedText, imageUrl);
 
-              console.log("Saved:", { decodedText, imageUrl });
+              console.log("✅ Saved scan:", { decodedText, imageUrl });
 
               if ("vibrate" in navigator) navigator.vibrate(100);
             } catch (err) {
