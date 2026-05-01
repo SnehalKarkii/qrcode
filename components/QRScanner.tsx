@@ -31,14 +31,26 @@ export function QRScanner({ isActive }: QRScannerProps) {
     setIsMounted(true);
   }, []);
 
-  // 📸 Capture current camera frame
+  // ⏳ Wait until camera video is ready
+  const waitForVideo = () =>
+    new Promise<void>((resolve) => {
+      const check = () => {
+        const video = document.querySelector("video") as HTMLVideoElement;
+        if (video && video.videoWidth > 0) resolve();
+        else requestAnimationFrame(check);
+      };
+      check();
+    });
+
+  // 📸 Capture frame from live video
   const captureScanImage = async (): Promise<Blob | null> => {
     try {
-      const video = document.querySelector(
-        "#qr-reader video",
-      ) as HTMLVideoElement;
+      const video = document.querySelector("video") as HTMLVideoElement;
 
-      if (!video) return null;
+      if (!video || video.videoWidth === 0) {
+        console.warn("Video not ready for capture");
+        return null;
+      }
 
       const canvas = document.createElement("canvas");
       canvas.width = video.videoWidth;
@@ -50,7 +62,7 @@ export function QRScanner({ isActive }: QRScannerProps) {
       ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
       return await new Promise((resolve) =>
-        canvas.toBlob((blob) => resolve(blob), "image/jpeg", 0.8),
+        canvas.toBlob((blob) => resolve(blob), "image/jpeg", 0.85),
       );
     } catch (err) {
       console.warn("Capture failed:", err);
@@ -58,7 +70,7 @@ export function QRScanner({ isActive }: QRScannerProps) {
     }
   };
 
-  // ☁️ Upload image to Supabase Storage
+  // ☁️ Upload image to Supabase
   const uploadScanImage = async (blob: Blob) => {
     const fileName = `scan-${Date.now()}.jpg`;
 
@@ -66,6 +78,7 @@ export function QRScanner({ isActive }: QRScannerProps) {
       .from("qr-scans")
       .upload(fileName, blob, {
         contentType: "image/jpeg",
+        upsert: true,
       });
 
     if (error) throw error;
@@ -77,7 +90,6 @@ export function QRScanner({ isActive }: QRScannerProps) {
 
   // 💾 Save scan to DB
   const saveToCloud = async (value: string, imageUrl?: string) => {
-    console.log("Saving to cloud:", value, imageUrl);
     try {
       const { error } = await supabase.from("scans").insert({
         value,
@@ -85,6 +97,8 @@ export function QRScanner({ isActive }: QRScannerProps) {
       });
 
       if (error) throw error;
+
+      console.log("Saved to Supabase ✔");
     } catch (err) {
       console.warn("Supabase save failed:", err);
     }
@@ -95,12 +109,13 @@ export function QRScanner({ isActive }: QRScannerProps) {
 
     let isComponentMounted = true;
 
-    const startScanning = async () => {
+    const startScanner = async () => {
       if (!isScannerActive) return;
 
       try {
         clearError();
 
+        // stop previous instance safely
         if (scannerRef.current && isScannerRunningRef.current) {
           try {
             await scannerRef.current.stop();
@@ -109,16 +124,16 @@ export function QRScanner({ isActive }: QRScannerProps) {
           isScannerRunningRef.current = false;
         }
 
-        scannerRef.current = new Html5Qrcode("qr-reader");
+        const scanner = new Html5Qrcode("qr-reader");
+        scannerRef.current = scanner;
 
         const cameras = await Html5Qrcode.getCameras();
+        if (!cameras.length) throw new Error("No cameras found");
 
-        if (!cameras.length) {
-          throw new Error("No cameras found");
-        }
+        const cameraId = cameras[cameras.length - 1].id;
 
-        await scannerRef.current.start(
-          cameras[cameras.length - 1].id,
+        await scanner.start(
+          cameraId,
           {
             fps: 10,
             qrbox: { width: 250, height: 250 },
@@ -126,8 +141,12 @@ export function QRScanner({ isActive }: QRScannerProps) {
           async (decodedText) => {
             addNewScan(decodedText);
 
-            // 📸 capture frame
+            // ⏳ ensure video is ready before capture
+            await waitForVideo();
+
             const imageBlob = await captureScanImage();
+
+            console.log("Captured blob:", imageBlob);
 
             let imageUrl = null;
 
@@ -135,27 +154,24 @@ export function QRScanner({ isActive }: QRScannerProps) {
               try {
                 imageUrl = await uploadScanImage(imageBlob);
               } catch (err) {
-                console.warn("Image upload failed:", err);
+                console.warn("Upload failed:", err);
               }
+            } else {
+              console.warn("No image captured");
             }
 
-            // 💾 save both text + image
             await saveToCloud(decodedText, imageUrl);
 
-            if ("vibrate" in navigator) {
-              navigator.vibrate(100);
-            }
+            if ("vibrate" in navigator) navigator.vibrate(100);
           },
-          (error) => {
-            console.debug("Scan error:", error);
+          (err) => {
+            console.debug("Scan error:", err);
           },
         );
 
         isScannerRunningRef.current = true;
 
-        if (isComponentMounted) {
-          setIsScanning(true);
-        }
+        if (isComponentMounted) setIsScanning(true);
       } catch (err) {
         const message =
           err instanceof Error ? err.message : "Camera start failed";
@@ -165,7 +181,7 @@ export function QRScanner({ isActive }: QRScannerProps) {
       }
     };
 
-    const stopScanning = async () => {
+    const stopScanner = async () => {
       if (scannerRef.current && isScannerRunningRef.current) {
         try {
           await scannerRef.current.stop();
@@ -177,8 +193,8 @@ export function QRScanner({ isActive }: QRScannerProps) {
       }
     };
 
-    if (isScannerActive) startScanning();
-    else stopScanning();
+    if (isScannerActive) startScanner();
+    else stopScanner();
 
     return () => {
       isComponentMounted = false;
